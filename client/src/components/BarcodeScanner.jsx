@@ -6,11 +6,11 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
   const videoRef = useRef(null)
   const streamRef = useRef(null)
   const scanningRef = useRef(false)
+  const lastScanRef = useRef({ value: '', timestamp: 0 })
   const detectorRef = useRef(null)
   const zxingReaderRef = useRef(null)
   const zxingLoadingRef = useRef(false)
   const [barcode, setBarcode] = useState('')
-  const [lastScannedBarcode, setLastScannedBarcode] = useState('')
   const [scannedPart, setScannedPart] = useState(null)
   const [showCreateForm, setShowCreateForm] = useState(false)
   const [cameraActive, setCameraActive] = useState(false)
@@ -113,8 +113,11 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
 
   const processBarcodeInput = async (barcodeValue) => {
     if (!barcodeValue) return
-    if (lastScannedBarcode === barcodeValue) return
-    setLastScannedBarcode(barcodeValue)
+    const now = Date.now()
+    if (lastScanRef.current.value === barcodeValue && now - lastScanRef.current.timestamp < 1500) {
+      return
+    }
+    lastScanRef.current = { value: barcodeValue, timestamp: now }
     try {
       const response = await fetch(`/api/parts/barcode/${encodeURIComponent(barcodeValue)}`)
       if (response.ok) {
@@ -275,34 +278,9 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
       }
 
       const canUseDetector = 'BarcodeDetector' in window && !detectorDisabled
-      const shouldUseDetector = preferredEngine === 'detector' || (preferredEngine === 'auto' && !isAndroid)
-      const shouldUseZXing = preferredEngine === 'zxing' || !canUseDetector || !shouldUseDetector
+      const shouldUseDetector = canUseDetector && preferredEngine !== 'zxing'
 
-      if (canUseDetector && shouldUseDetector) {
-        const formats = Array.isArray(supportedFormats) && supportedFormats.length > 0
-          ? supportedFormats
-          : [
-            'qr_code',
-            'code_128',
-            'ean_13',
-            'ean_8',
-            'code_39',
-            'code_93',
-            'upc_a',
-            'upc_e',
-            'itf',
-            'codabar',
-            'data_matrix'
-          ]
-        detectorRef.current = new BarcodeDetector({ formats })
-      }
-
-      setCameraActive(true)
-      if (canUseDetector && shouldUseDetector) {
-        setScanEngine('BarcodeDetector')
-        scanningRef.current = true
-        scanFrame()
-      } else {
+      const startZXingScan = async () => {
         setScanEngine('ZXing')
         setCameraError('')
         const reader = await ensureZXingReader()
@@ -326,7 +304,35 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
           }
         }
         reader.decodeFromVideoElement(videoRef.current, decodeCallback)
+      }
 
+      if (shouldUseDetector) {
+        const formats = Array.isArray(supportedFormats) && supportedFormats.length > 0
+          ? supportedFormats
+          : [
+            'qr_code',
+            'code_128',
+            'ean_13',
+            'ean_8',
+            'code_39',
+            'code_93',
+            'upc_a',
+            'upc_e',
+            'itf',
+            'codabar',
+            'data_matrix'
+          ]
+        detectorRef.current = new BarcodeDetector({ formats })
+      }
+
+      setCameraActive(true)
+      if (shouldUseDetector) {
+        setScanEngine('BarcodeDetector')
+        setCameraError('')
+        scanningRef.current = true
+        scanFrame()
+      } else {
+        await startZXingScan()
         setTimeout(() => {
           if (scanningRef.current) {
             setCameraError('Nuskaitoma... Jei nieko neranda, pabandykite „ZXing“ režimą ir priartinti barkodą.')
@@ -378,6 +384,34 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
         }
       } catch (error) {
         console.error('Scan error:', error)
+        const shouldFallbackToZXing = preferredEngine === 'auto'
+        if (shouldFallbackToZXing) {
+          detectorRef.current = null
+          setCameraError('BarcodeDetector nepavyko. Perjungiama į ZXing...')
+          const reader = await ensureZXingReader()
+          if (!reader) {
+            setCameraError('Nepavyko įkelti ZXing po BarcodeDetector klaidos.')
+            return
+          }
+          await reader.reset()
+          const decodeCallback = (result, zxingError) => {
+            if (result) {
+              const detected = sanitizeBarcode(result.getText())
+              if (!detected) return
+              scanningRef.current = false
+              stopCamera()
+              setBarcode(detected)
+              processBarcodeInput(detected)
+            } else if (zxingError && zxingError.name !== 'NotFoundException') {
+              console.error('ZXing scan error:', zxingError)
+              setCameraError(`ZXing klaida: ${zxingError.name || 'nežinoma'}`)
+            }
+          }
+          reader.decodeFromVideoElement(videoRef.current, decodeCallback)
+          setScanEngine('ZXing')
+          return
+        }
+
         setCameraError(`BarcodeDetector klaida: ${error.name || 'nežinoma'}`)
       }
     }
