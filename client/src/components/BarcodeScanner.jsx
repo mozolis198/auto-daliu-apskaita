@@ -21,7 +21,7 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
   const [torchOn, setTorchOn] = useState(false)
   const isAndroid = /Android/i.test(navigator.userAgent || '')
   const [scanEngine, setScanEngine] = useState('')
-  const [preferredEngine, setPreferredEngine] = useState('auto')
+  const [preferredEngine, setPreferredEngine] = useState(isAndroid ? 'zxing' : 'auto')
   const [supportedFormats, setSupportedFormats] = useState([])
   const [usingFrontCamera, setUsingFrontCamera] = useState(false)
   const [formData, setFormData] = useState({
@@ -50,6 +50,10 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
         .then((formats) => setSupportedFormats(formats || []))
         .catch(() => setSupportedFormats([]))
     }
+    if (isAndroid) {
+      setDetectorDisabled(true)
+      setPreferredEngine('zxing')
+    }
   }, [isAndroid])
 
   useEffect(() => {
@@ -74,12 +78,15 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
             module.BarcodeFormat.EAN_8,
             module.BarcodeFormat.CODE_128,
             module.BarcodeFormat.CODE_39,
+            module.BarcodeFormat.CODE_93,
             module.BarcodeFormat.UPC_A,
             module.BarcodeFormat.UPC_E,
             module.BarcodeFormat.ITF,
-            module.BarcodeFormat.CODABAR
+            module.BarcodeFormat.CODABAR,
+            module.BarcodeFormat.QR_CODE,
+            module.BarcodeFormat.DATA_MATRIX
           ])
-          reader = new module.BrowserMultiFormatReader(hints, 300)
+          reader = new module.BrowserMultiFormatReader(hints, isAndroid ? 100 : 180)
         } else {
           reader = new module.BrowserMultiFormatReader()
         }
@@ -251,7 +258,8 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
         const capabilities = videoTrack.getCapabilities()
         if (capabilities?.torch) {
           setTorchSupported(true)
-          videoTrack.applyConstraints({ advanced: [{ torch: false }] }).catch(() => {})
+        } else {
+          setTorchSupported(false)
         }
         const advancedConstraints = []
         if (capabilities?.focusMode?.includes?.('continuous')) {
@@ -335,7 +343,7 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
         await startZXingScan()
         setTimeout(() => {
           if (scanningRef.current) {
-            setCameraError('Nuskaitoma... Jei nieko neranda, pabandykite „ZXing“ režimą ir priartinti barkodą.')
+            setCameraError('Nuskaitoma... Priartinkite barkodą 10-20 cm, laikykite stabiliai ir, jei per šviesu, išjunkite žibintuvėlį.')
           }
         }, 2000)
       }
