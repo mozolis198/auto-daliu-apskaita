@@ -1,60 +1,50 @@
-import React, { useState, useRef, useEffect } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import './BarcodeScanner.css'
+
+const DEFAULT_FORM_DATA = {
+  name: '',
+  category_id: '',
+  quantity: 1,
+  price: 0,
+  cost: 0,
+  description: '',
+  car_make: '',
+  car_model: '',
+  car_year_from: '',
+  car_year_to: '',
+  oe_number: ''
+}
+
+const REAR_CAMERA_LABEL = /(back|rear|environment|world|traseira|trasera|arriere|hinten|zadnja|后|後|背)/i
+const MOBILE_USER_AGENT = /Android|iPhone|iPad|iPod/i
 
 function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
   const inputRef = useRef(null)
   const videoRef = useRef(null)
   const streamRef = useRef(null)
+  const readerRef = useRef(null)
+  const zxingModuleRef = useRef(null)
   const scanningRef = useRef(false)
   const lastScanRef = useRef({ value: '', timestamp: 0 })
-  const detectorRef = useRef(null)
-  const zxingReaderRef = useRef(null)
-  const zxingLoadingRef = useRef(false)
+
   const [barcode, setBarcode] = useState('')
   const [scannedPart, setScannedPart] = useState(null)
   const [showCreateForm, setShowCreateForm] = useState(false)
+  const [formData, setFormData] = useState(DEFAULT_FORM_DATA)
+
   const [cameraActive, setCameraActive] = useState(false)
+  const [cameraStarting, setCameraStarting] = useState(false)
   const [cameraError, setCameraError] = useState('')
-  const [detectorSupported, setDetectorSupported] = useState(false)
-  const [detectorDisabled, setDetectorDisabled] = useState(false)
+  const [cameraStatus, setCameraStatus] = useState('')
   const [torchSupported, setTorchSupported] = useState(false)
   const [torchOn, setTorchOn] = useState(false)
-  const isAndroid = /Android/i.test(navigator.userAgent || '')
-  const [scanEngine, setScanEngine] = useState('')
-  const [preferredEngine, setPreferredEngine] = useState(isAndroid ? 'zxing' : 'auto')
-  const [supportedFormats, setSupportedFormats] = useState([])
   const [usingFrontCamera, setUsingFrontCamera] = useState(false)
-  const [formData, setFormData] = useState({
-    name: '',
-    category_id: '',
-    quantity: 1,
-    price: 0,
-    cost: 0,
-    description: '',
-    car_make: '',
-    car_model: '',
-    car_year_from: '',
-    car_year_to: '',
-    oe_number: ''
-  })
+
+  const isMobile = useMemo(() => MOBILE_USER_AGENT.test(navigator.userAgent || ''), [])
 
   useEffect(() => {
     inputRef.current?.focus()
   }, [])
-
-  useEffect(() => {
-    const supported = 'BarcodeDetector' in window
-    setDetectorSupported(supported)
-    if (supported) {
-      BarcodeDetector.getSupportedFormats()
-        .then((formats) => setSupportedFormats(formats || []))
-        .catch(() => setSupportedFormats([]))
-    }
-    if (isAndroid) {
-      setDetectorDisabled(true)
-      setPreferredEngine('zxing')
-    }
-  }, [isAndroid])
 
   useEffect(() => {
     return () => {
@@ -62,69 +52,59 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
     }
   }, [])
 
-  const ensureZXingReader = async () => {
-    if (zxingReaderRef.current) return zxingReaderRef.current
-    if (zxingLoadingRef.current) return null
-    zxingLoadingRef.current = true
-    try {
-      const module = await import('https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/+esm')
-      let reader
-      try {
-        if (module.DecodeHintType && module.BarcodeFormat) {
-          const hints = new Map()
-          hints.set(module.DecodeHintType.TRY_HARDER, true)
-          hints.set(module.DecodeHintType.POSSIBLE_FORMATS, [
-            module.BarcodeFormat.EAN_13,
-            module.BarcodeFormat.EAN_8,
-            module.BarcodeFormat.CODE_128,
-            module.BarcodeFormat.CODE_39,
-            module.BarcodeFormat.CODE_93,
-            module.BarcodeFormat.UPC_A,
-            module.BarcodeFormat.UPC_E,
-            module.BarcodeFormat.ITF,
-            module.BarcodeFormat.CODABAR,
-            module.BarcodeFormat.QR_CODE,
-            module.BarcodeFormat.DATA_MATRIX
-          ])
-          reader = new module.BrowserMultiFormatReader(hints, isAndroid ? 100 : 180)
-        } else {
-          reader = new module.BrowserMultiFormatReader()
-        }
-      } catch (hintError) {
-        console.warn('ZXing hints init failed:', hintError)
-        reader = new module.BrowserMultiFormatReader()
-      }
-      zxingReaderRef.current = reader
-      return reader
-    } catch (error) {
-      console.error('ZXing load error:', error)
-      return null
-    } finally {
-      zxingLoadingRef.current = false
-    }
-  }
-
-  const handleBarcodeInput = async (e) => {
-    if (e.key === 'Enter' && barcode.trim()) {
-      const barcodeValue = sanitizeBarcode(barcode.trim())
-      await processBarcodeInput(barcodeValue)
-      setBarcode('')
-      inputRef.current?.focus()
-    }
-  }
-
   const sanitizeBarcode = (value) => {
     if (!value) return ''
     return value.replace(/[\s\r\n\t]/g, '').replace(/[\u0010-\u001f]/g, '')
   }
 
-  const processBarcodeInput = async (barcodeValue) => {
-    if (!barcodeValue) return
+  const isDuplicateScan = (value) => {
     const now = Date.now()
-    if (lastScanRef.current.value === barcodeValue && now - lastScanRef.current.timestamp < 1500) {
-      return
+    if (lastScanRef.current.value === value && now - lastScanRef.current.timestamp < 1800) {
+      return true
     }
-    lastScanRef.current = { value: barcodeValue, timestamp: now }
+    lastScanRef.current = { value, timestamp: now }
+    return false
+  }
+
+  const ensureReader = async () => {
+    if (!readerRef.current) {
+      if (!zxingModuleRef.current) {
+        zxingModuleRef.current = await import('@zxing/browser')
+      }
+      const { BrowserMultiFormatReader } = zxingModuleRef.current
+      readerRef.current = new BrowserMultiFormatReader(undefined, 100)
+    }
+    return readerRef.current
+  }
+
+  const stopCamera = () => {
+    scanningRef.current = false
+    if (readerRef.current) {
+      readerRef.current.reset()
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop())
+      streamRef.current = null
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null
+    }
+
+    setCameraActive(false)
+    setCameraStarting(false)
+    setTorchOn(false)
+    setTorchSupported(false)
+    setUsingFrontCamera(false)
+    setCameraStatus('')
+  }
+
+  const processBarcodeInput = async (rawBarcode) => {
+    const barcodeValue = sanitizeBarcode(rawBarcode)
+    if (!barcodeValue || isDuplicateScan(barcodeValue)) return
+
+    setBarcode(barcodeValue)
+    setCameraStatus('Nuskaitoma...')
+
     try {
       const response = await fetch(`/api/parts/barcode/${encodeURIComponent(barcodeValue)}`)
       if (response.ok) {
@@ -134,348 +114,244 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
       } else {
         setScannedPart(null)
         setShowCreateForm(true)
-        setFormData(prev => ({ ...prev, barcode: barcodeValue }))
+        setFormData((prev) => ({ ...prev, barcode: barcodeValue }))
       }
     } catch (error) {
-      console.error('Error processing barcode:', error)
+      console.error('Barcode lookup error:', error)
+      setCameraError('Nepavyko patikrinti barkodo. Patikrinkite interneto ryšį.')
     }
+  }
+
+  const chooseRearCamera = (devices) => {
+    const videoDevices = devices.filter((device) => device.kind === 'videoinput')
+    if (videoDevices.length === 0) return null
+    return videoDevices.find((device) => REAR_CAMERA_LABEL.test(device.label || '')) || videoDevices[0]
+  }
+
+  const applyVideoEnhancements = async (track) => {
+    if (!track?.getCapabilities || !track?.applyConstraints) {
+      setTorchSupported(false)
+      return
+    }
+
+    const capabilities = track.getCapabilities()
+    setTorchSupported(Boolean(capabilities?.torch))
+
+    const advanced = []
+    if (capabilities?.focusMode?.includes?.('continuous')) advanced.push({ focusMode: 'continuous' })
+    else if (capabilities?.focusMode?.includes?.('auto')) advanced.push({ focusMode: 'auto' })
+    if (capabilities?.exposureMode?.includes?.('continuous')) advanced.push({ exposureMode: 'continuous' })
+    else if (capabilities?.exposureMode?.includes?.('auto')) advanced.push({ exposureMode: 'auto' })
+    if (capabilities?.whiteBalanceMode?.includes?.('continuous')) advanced.push({ whiteBalanceMode: 'continuous' })
+    else if (capabilities?.whiteBalanceMode?.includes?.('auto')) advanced.push({ whiteBalanceMode: 'auto' })
+
+    if (advanced.length > 0) {
+      try {
+        await track.applyConstraints({ advanced })
+      } catch {
+        // ignore unsupported advanced constraints
+      }
+    }
+
+    if (capabilities?.torch) {
+      try {
+        await track.applyConstraints({ advanced: [{ torch: false }] })
+      } catch {
+        // some phones throw even though torch exists
+      }
+    }
+  }
+
+  const openCameraStream = async () => {
+    const base = {
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+      frameRate: { ideal: isMobile ? 24 : 30 }
+    }
+
+    const initialCandidates = [
+      { ...base, facingMode: { ideal: 'environment' } },
+      { ...base, facingMode: 'environment' },
+      { ...base }
+    ]
+
+    let stream = null
+    let lastError = null
+
+    for (const candidate of initialCandidates) {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: candidate, audio: false })
+        break
+      } catch (error) {
+        lastError = error
+      }
+    }
+
+    if (!stream) {
+      throw lastError || new Error('Nepavyko pasiekti kameros')
+    }
+
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices()
+      const rearCamera = chooseRearCamera(devices)
+      if (rearCamera?.deviceId) {
+        const selectedTrack = stream.getVideoTracks()[0]
+        const selectedId = selectedTrack?.getSettings?.()?.deviceId
+        if (selectedId !== rearCamera.deviceId) {
+          stream.getTracks().forEach((track) => track.stop())
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              ...base,
+              deviceId: { exact: rearCamera.deviceId }
+            },
+            audio: false
+          })
+        }
+      }
+    } catch {
+      // keep initial stream when enumerateDevices/deviceId fails
+    }
+
+    return stream
+  }
+
+  const startDecodeLoop = async () => {
+    let reader
+    try {
+      reader = await ensureReader()
+    } catch (error) {
+      console.error('ZXing load error:', error)
+      setCameraError('Nepavyko įkelti barkodo skaitytuvo. Perkraukite puslapį.')
+      return
+    }
+
+    const videoElement = videoRef.current
+    if (!videoElement) return
+
+    scanningRef.current = true
+    setCameraStatus('Nukreipkite kamerą į barkodą')
+
+    reader.decodeFromVideoElement(videoElement, (result, error) => {
+      if (!scanningRef.current) return
+
+      if (result) {
+        const detectedCode = sanitizeBarcode(result.getText())
+        if (!detectedCode) return
+        scanningRef.current = false
+        setCameraStatus('Barkodas rastas')
+        stopCamera()
+        processBarcodeInput(detectedCode)
+        return
+      }
+
+      if (error && error.name !== 'NotFoundException') {
+        console.error('ZXing decode error:', error)
+      }
+    })
   }
 
   const startCamera = async () => {
     setCameraError('')
-    if (zxingReaderRef.current) {
-      zxingReaderRef.current.reset()
-      zxingReaderRef.current = null
-    }
-    if (detectorRef.current) {
-      detectorRef.current = null
-    }
+    setCameraStatus('Jungiama kamera...')
+    setCameraStarting(true)
 
     if (!navigator.mediaDevices?.getUserMedia) {
-      setCameraError('Ši naršyklė nepalaiko kameros API.')
+      setCameraStarting(false)
+      setCameraStatus('')
+      setCameraError('Jūsų naršyklė nepalaiko kameros API.')
       return
     }
 
     try {
-      const getStream = async (constraints) => {
-        return navigator.mediaDevices.getUserMedia({
-          video: constraints,
-          audio: false
-        })
-      }
-
-      const exactEnvironmentConstraints = {
-        facingMode: { exact: 'environment' },
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        frameRate: { ideal: 30 }
-      }
-
-      const idealEnvironmentConstraints = {
-        facingMode: { ideal: 'environment' },
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        frameRate: { ideal: 30 }
-      }
-
-      const genericConstraints = {
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        frameRate: { ideal: 30 }
-      }
-
-      const streamCandidates = isAndroid
-        ? [idealEnvironmentConstraints, exactEnvironmentConstraints, genericConstraints]
-        : [exactEnvironmentConstraints, idealEnvironmentConstraints, genericConstraints]
-
-      let stream
-      let lastStreamError = null
-      for (const candidate of streamCandidates) {
-        try {
-          stream = await getStream(candidate)
-          break
-        } catch (streamError) {
-          lastStreamError = streamError
-        }
-      }
-
-      if (!stream) {
-        throw lastStreamError || new Error('Failed to open camera stream')
-      }
-
+      stopCamera()
+      const stream = await openCameraStream()
       streamRef.current = stream
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream
-        videoRef.current.setAttribute('playsinline', 'true')
-        if (isAndroid) {
-          videoRef.current.setAttribute('autofocus', 'true')
-        }
-        await videoRef.current.play()
+
+      const track = stream.getVideoTracks()[0]
+      const label = (track?.label || '').toLowerCase()
+      setUsingFrontCamera(label.includes('front') || label.includes('user'))
+      await applyVideoEnhancements(track)
+
+      if (!videoRef.current) {
+        throw new Error('Video element not available')
       }
 
-      const trackLabel = stream.getVideoTracks()[0]?.label?.toLowerCase?.() || ''
-      setUsingFrontCamera(trackLabel.includes('front') || trackLabel.includes('user'))
-
-      setTimeout(async () => {
-        const videoEl = videoRef.current
-        if (!videoEl || videoEl.videoWidth > 0) return
-        streamRef.current?.getTracks().forEach(track => track.stop())
-        try {
-            stream = await getStream(idealEnvironmentConstraints)
-          streamRef.current = stream
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream
-            await videoRef.current.play()
-          }
-          const fallbackLabel = stream.getVideoTracks()[0]?.label?.toLowerCase?.() || ''
-          setUsingFrontCamera(fallbackLabel.includes('front') || fallbackLabel.includes('user'))
-          setTimeout(() => {
-            const retryVideo = videoRef.current
-            if (retryVideo && retryVideo.videoWidth === 0) {
-              setCameraError('Kamera neperduoda vaizdo. Patikrinkite leidimus ir bandykite kitą naršyklę (Chrome/Samsung Internet).')
-            }
-          }, 800)
-        } catch (fallbackError) {
-          console.error('Camera fallback error:', fallbackError)
-          try {
-            stream = await getStream({ width: { ideal: 1280 }, height: { ideal: 720 } })
-            streamRef.current = stream
-            if (videoRef.current) {
-              videoRef.current.srcObject = stream
-              await videoRef.current.play()
-            }
-            const anyLabel = stream.getVideoTracks()[0]?.label?.toLowerCase?.() || ''
-            setUsingFrontCamera(anyLabel.includes('front') || anyLabel.includes('user'))
-          } catch (finalError) {
-            console.error('Camera final error:', finalError)
-            setCameraError('Nepavyko įjungti kameros. Patikrinkite leidimus.')
-          }
-        }
-      }, 700)
-
-      const videoTrack = stream.getVideoTracks()[0]
-      if (videoTrack?.getCapabilities) {
-        const capabilities = videoTrack.getCapabilities()
-        if (capabilities?.torch) {
-          setTorchSupported(true)
-        } else {
-          setTorchSupported(false)
-        }
-        const advancedConstraints = []
-        if (capabilities?.focusMode?.includes?.('continuous')) {
-          advancedConstraints.push({ focusMode: 'continuous' })
-        } else if (capabilities?.focusMode?.includes?.('auto')) {
-          advancedConstraints.push({ focusMode: 'auto' })
-        }
-        if (capabilities?.exposureMode?.includes?.('continuous')) {
-          advancedConstraints.push({ exposureMode: 'continuous' })
-        } else if (capabilities?.exposureMode?.includes?.('auto')) {
-          advancedConstraints.push({ exposureMode: 'auto' })
-        }
-        if (capabilities?.whiteBalanceMode?.includes?.('continuous')) {
-          advancedConstraints.push({ whiteBalanceMode: 'continuous' })
-        } else if (capabilities?.whiteBalanceMode?.includes?.('auto')) {
-          advancedConstraints.push({ whiteBalanceMode: 'auto' })
-        }
-        if (capabilities?.resizeMode?.includes?.('crop-and-scale')) {
-          advancedConstraints.push({ resizeMode: 'crop-and-scale' })
-        }
-        if (advancedConstraints.length > 0) {
-          videoTrack.applyConstraints({ advanced: advancedConstraints }).catch(() => {})
-        }
-      }
-
-      const canUseDetector = 'BarcodeDetector' in window && !detectorDisabled
-      const shouldUseDetector = canUseDetector && preferredEngine !== 'zxing'
-
-      const startZXingScan = async () => {
-        setScanEngine('ZXing')
-        setCameraError('')
-        const reader = await ensureZXingReader()
-        if (!reader) {
-          setCameraError('Nepavyko įkelti ZXing. Patikrinkite ryšį ir bandykite dar kartą.')
-          return
-        }
-        await reader.reset()
-        scanningRef.current = true
-        const decodeCallback = (result, error) => {
-          if (result) {
-            const detected = sanitizeBarcode(result.getText())
-            if (!detected) return
-            scanningRef.current = false
-            stopCamera()
-            setBarcode(detected)
-            processBarcodeInput(detected)
-          } else if (error && error.name !== 'NotFoundException') {
-            console.error('ZXing scan error:', error)
-            setCameraError(`ZXing klaida: ${error.name || 'nežinoma'}`)
-          }
-        }
-        reader.decodeFromVideoElement(videoRef.current, decodeCallback)
-      }
-
-      if (shouldUseDetector) {
-        const formats = Array.isArray(supportedFormats) && supportedFormats.length > 0
-          ? supportedFormats
-          : [
-            'qr_code',
-            'code_128',
-            'ean_13',
-            'ean_8',
-            'code_39',
-            'code_93',
-            'upc_a',
-            'upc_e',
-            'itf',
-            'codabar',
-            'data_matrix'
-          ]
-        detectorRef.current = new BarcodeDetector({ formats })
-      }
+      videoRef.current.srcObject = stream
+      videoRef.current.setAttribute('playsinline', 'true')
+      await videoRef.current.play()
 
       setCameraActive(true)
-      if (shouldUseDetector) {
-        setScanEngine('BarcodeDetector')
-        setCameraError('')
-        scanningRef.current = true
-        scanFrame()
-      } else {
-        await startZXingScan()
-        setTimeout(() => {
-          if (scanningRef.current) {
-            setCameraError('Nuskaitoma... Priartinkite barkodą 10-20 cm, laikykite stabiliai ir, jei per šviesu, išjunkite žibintuvėlį.')
-          }
-        }, 2000)
-      }
-
-      if (videoRef.current) {
-        videoRef.current.setAttribute('autofocus', 'true')
-        videoRef.current.setAttribute('data-autofocus', 'true')
-      }
+      setCameraStarting(false)
+      setCameraError('')
+      startDecodeLoop()
     } catch (error) {
-      console.error('Camera start error:', error)
-      setCameraError('Nepavyko įjungti kameros. Patikrinkite leidimus.')
+      console.error('Start camera error:', error)
+      stopCamera()
+      setCameraError('Nepavyko įjungti kameros. Leiskite kameros teises ir bandykite dar kartą.')
+      setCameraStarting(false)
+      setCameraStatus('')
     }
-  }
-
-  const stopCamera = () => {
-    scanningRef.current = false
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop())
-      streamRef.current = null
-    }
-    if (zxingReaderRef.current) {
-      zxingReaderRef.current.reset()
-      zxingReaderRef.current = null
-    }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null
-    }
-    setCameraActive(false)
-    setTorchOn(false)
-    setScanEngine('')
-  }
-
-  const scanFrame = async () => {
-    if (!scanningRef.current || !videoRef.current || !detectorRef.current) return
-
-    if (videoRef.current.readyState >= 2) {
-      try {
-        const barcodes = await detectorRef.current.detect(videoRef.current)
-        if (barcodes.length > 0) {
-          const detected = sanitizeBarcode(barcodes[0].rawValue)
-          scanningRef.current = false
-          stopCamera()
-          setBarcode(detected)
-          await processBarcodeInput(detected)
-          return
-        }
-      } catch (error) {
-        console.error('Scan error:', error)
-        const shouldFallbackToZXing = preferredEngine === 'auto'
-        if (shouldFallbackToZXing) {
-          detectorRef.current = null
-          setCameraError('BarcodeDetector nepavyko. Perjungiama į ZXing...')
-          const reader = await ensureZXingReader()
-          if (!reader) {
-            setCameraError('Nepavyko įkelti ZXing po BarcodeDetector klaidos.')
-            return
-          }
-          await reader.reset()
-          const decodeCallback = (result, zxingError) => {
-            if (result) {
-              const detected = sanitizeBarcode(result.getText())
-              if (!detected) return
-              scanningRef.current = false
-              stopCamera()
-              setBarcode(detected)
-              processBarcodeInput(detected)
-            } else if (zxingError && zxingError.name !== 'NotFoundException') {
-              console.error('ZXing scan error:', zxingError)
-              setCameraError(`ZXing klaida: ${zxingError.name || 'nežinoma'}`)
-            }
-          }
-          reader.decodeFromVideoElement(videoRef.current, decodeCallback)
-          setScanEngine('ZXing')
-          return
-        }
-
-        setCameraError(`BarcodeDetector klaida: ${error.name || 'nežinoma'}`)
-      }
-    }
-
-    requestAnimationFrame(scanFrame)
   }
 
   const toggleTorch = async () => {
-    if (!streamRef.current) return
+    if (!streamRef.current || !torchSupported) return
     const track = streamRef.current.getVideoTracks()[0]
     if (!track?.applyConstraints) return
-    const next = !torchOn
+
+    const nextState = !torchOn
     try {
-      await track.applyConstraints({ advanced: [{ torch: next }] })
-      setTorchOn(next)
+      await track.applyConstraints({ advanced: [{ torch: nextState }] })
+      setTorchOn(nextState)
     } catch (error) {
-      console.error('Torch error:', error)
+      console.error('Torch toggle error:', error)
+      setCameraError('Nepavyko perjungti žibintuvėlio šiame telefone.')
     }
+  }
+
+  const handleBarcodeInput = async (event) => {
+    if (event.key !== 'Enter') return
+    const barcodeValue = sanitizeBarcode(barcode)
+    if (!barcodeValue) return
+    await processBarcodeInput(barcodeValue)
+    setBarcode('')
+    inputRef.current?.focus()
   }
 
   const handlePartFound = (part) => {
     onBarcodeDetected(part.barcode)
     setBarcode('')
     setScannedPart(null)
+    setShowCreateForm(false)
+    setCameraError('')
+    setCameraStatus('')
+    inputRef.current?.focus()
   }
 
-  const handleCreatePart = async (e) => {
-    e.preventDefault()
+  const handleCreatePart = async (event) => {
+    event.preventDefault()
     if (!formData.name) {
       alert('Prašome įvesti detalės pavadinimą')
       return
     }
 
-    const success = await onNewPart({
+    const payload = {
       ...formData,
-      barcode: barcode
-    })
-
-    if (success) {
-      setShowCreateForm(false)
-      setFormData({
-        name: '',
-        category_id: '',
-        quantity: 1,
-        price: 0,
-        cost: 0,
-        description: '',
-        car_make: '',
-        car_model: '',
-        car_year_from: '',
-        car_year_to: '',
-        oe_number: ''
-      })
-      setBarcode('')
-      inputRef.current?.focus()
+      barcode,
+      quantity: Number(formData.quantity) || 1,
+      price: Number(formData.price) || 0,
+      cost: Number(formData.cost) || 0,
+      car_year_from: formData.car_year_from ? Number(formData.car_year_from) : null,
+      car_year_to: formData.car_year_to ? Number(formData.car_year_to) : null
     }
+
+    const success = await onNewPart(payload)
+    if (!success) return
+
+    setShowCreateForm(false)
+    setFormData(DEFAULT_FORM_DATA)
+    setBarcode('')
+    setCameraStatus('Detalė sėkmingai sukurta')
+    inputRef.current?.focus()
   }
 
   const getGoogleSearchUrl = () => {
@@ -487,96 +363,55 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
   return (
     <div className="scanner-container">
       <div className="scanner-input-section">
-        <label>Nuskaitykite barkodiniu:</label>
+        <label>Nuskaitykite barkodą:</label>
         <input
           ref={inputRef}
           type="text"
           value={barcode}
-          onChange={(e) => setBarcode(e.target.value)}
-          onKeyPress={handleBarcodeInput}
-          placeholder="Čia bus skaitytas barkodas..."
+          onChange={(event) => setBarcode(event.target.value)}
+          onKeyDown={handleBarcodeInput}
+          placeholder="Čia bus nuskaitytas barkodas..."
           className="barcode-input"
           autoComplete="off"
           disabled={loading}
         />
-        <p className="hint">💡 Sutelkite kursoriumi į šį laukelį ir nuskaitykite barkodinį tiesiog jam</p>
+
+        <p className="hint">💡 Galite skanuoti kamera arba įvesti kodą ranka ir spausti Enter</p>
+
         <div className="camera-actions">
           {!cameraActive ? (
-            <button type="button" className="btn btn-primary" onClick={startCamera}>
-              📷 Įjungti kamerą
+            <button type="button" className="btn btn-primary" onClick={startCamera} disabled={cameraStarting}>
+              {cameraStarting ? '⏳ Jungiama kamera...' : '📷 Pradėti skanavimą telefonu'}
             </button>
           ) : (
             <button type="button" className="btn btn-secondary" onClick={stopCamera}>
-              ⛔ Išjungti kamerą
+              ⛔ Sustabdyti kamerą
             </button>
           )}
-          {torchSupported && cameraActive && (
+
+          {cameraActive && torchSupported && (
             <button type="button" className="btn btn-secondary" onClick={toggleTorch}>
               {torchOn ? '🔦 Išjungti šviesą' : '🔦 Įjungti šviesą'}
             </button>
           )}
-          <div className="engine-toggle">
-            <span className="engine-label">Skaitytuvas:</span>
-            {!isAndroid && (
-              <button
-                type="button"
-                className={`btn btn-secondary ${preferredEngine === 'auto' ? 'active' : ''}`}
-                onClick={() => setPreferredEngine('auto')}
-                disabled={cameraActive}
-              >
-                Auto
-              </button>
-            )}
-            <button
-              type="button"
-              className={`btn btn-secondary ${preferredEngine === 'zxing' ? 'active' : ''}`}
-              onClick={() => setPreferredEngine('zxing')}
-              disabled={cameraActive}
-            >
-              ZXing
-            </button>
-            <button
-              type="button"
-              className={`btn btn-secondary ${preferredEngine === 'detector' ? 'active' : ''}`}
-              onClick={() => {
-                setDetectorDisabled(false)
-                setPreferredEngine('detector')
-              }}
-              disabled={cameraActive || !detectorSupported}
-            >
-              Detector
-            </button>
-            {detectorSupported && (
-              <button
-                type="button"
-                className={`btn btn-secondary ${detectorDisabled ? 'active' : ''}`}
-                onClick={() => {
-                  setDetectorDisabled(true)
-                  setPreferredEngine('zxing')
-                }}
-                disabled={cameraActive}
-              >
-                Išjungti Detector
-              </button>
-            )}
-          </div>
-          {supportedFormats.length > 0 && (
-            <span className="camera-info">BarcodeDetector formatai: {supportedFormats.join(', ')}</span>
-          )}
-          {!detectorSupported && (
-            <span className="camera-warning">Naršyklė nepalaiko BarcodeDetector. Bus naudojamas ZXing.</span>
-          )}
-          {scanEngine && (
-            <span className="camera-info">Aktyvus skaitytuvas: {scanEngine}</span>
-          )}
+
+          {cameraStatus && <span className="camera-info">{cameraStatus}</span>}
         </div>
+
         {cameraError && <div className="camera-error">{cameraError}</div>}
+
         {usingFrontCamera && (
-          <div className="camera-error">Įjungta priekinė kamera. Jei įmanoma, naršyklė turi naudoti galinę kamerą.</div>
+          <div className="camera-warning">Aptikta priekinė kamera. Geriausiam rezultatui naudokite galinę kamerą.</div>
         )}
+
         {cameraActive && (
           <div className="camera-preview">
-            <video ref={videoRef} className="camera-video" muted playsInline autoPlay />
+            <div className="camera-preview-inner">
+              <video ref={videoRef} className="camera-video" muted playsInline autoPlay />
+              <div className="scan-overlay" aria-hidden="true">
+                <div className="scan-guide" />
+              </div>
+            </div>
           </div>
         )}
       </div>
@@ -587,32 +422,29 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
           <div className="part-info">
             <p><strong>Pavadinimas:</strong> {scannedPart.name}</p>
             <p><strong>Barkodas:</strong> {scannedPart.barcode}</p>
-            {scannedPart.category_name && (
-              <p><strong>Kategorija:</strong> {scannedPart.category_name}</p>
-            )}
+            {scannedPart.category_name && <p><strong>Kategorija:</strong> {scannedPart.category_name}</p>}
             <p><strong>Kiekis:</strong> {scannedPart.quantity} vnt</p>
-            {scannedPart.price > 0 && (
-              <p><strong>Kaina:</strong> {scannedPart.price.toFixed(2)} €</p>
-            )}
+            {scannedPart.price > 0 && <p><strong>Kaina:</strong> {scannedPart.price.toFixed(2)} €</p>}
             {(scannedPart.car_make || scannedPart.car_model) && (
               <p style={{ backgroundColor: '#e3f2fd', padding: '8px', borderRadius: '4px', borderLeft: '4px solid #2196f3', marginTop: '10px' }}>
                 <strong>🚗 Automobilis:</strong> {scannedPart.car_make && <span>{scannedPart.car_make}</span>} {scannedPart.car_model && <span>{scannedPart.car_model}</span>}
                 {(scannedPart.car_year_from || scannedPart.car_year_to) && (
                   <span style={{ marginLeft: '10px', backgroundColor: '#0d47a1', color: 'white', padding: '2px 6px', borderRadius: '3px', fontSize: '12px' }}>
-                    {scannedPart.car_year_from && scannedPart.car_year_to ? `${scannedPart.car_year_from}-${scannedPart.car_year_to}` : scannedPart.car_year_from ? `${scannedPart.car_year_from}m.+` : `iki ${scannedPart.car_year_to}m.`}
+                    {scannedPart.car_year_from && scannedPart.car_year_to
+                      ? `${scannedPart.car_year_from}-${scannedPart.car_year_to}`
+                      : scannedPart.car_year_from
+                        ? `${scannedPart.car_year_from}m.+`
+                        : `iki ${scannedPart.car_year_to}m.`}
                   </span>
                 )}
               </p>
             )}
           </div>
           <div className="part-actions">
-            <button 
-              className="btn btn-primary"
-              onClick={() => handlePartFound(scannedPart)}
-            >
+            <button className="btn btn-primary" onClick={() => handlePartFound(scannedPart)}>
               ✓ Gerai, tęsti
             </button>
-            <button 
+            <button
               className="btn btn-secondary"
               onClick={() => {
                 setScannedPart(null)
@@ -629,15 +461,15 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
       {showCreateForm && !scannedPart && (
         <div className="create-form-card">
           <h3>Naujos detalės forma</h3>
-          <p>Detalės su šituo barkodu ({barcode}) nėra. Sukurkite ją:</p>
-          
+          <p>Detalės su barkodu ({barcode}) nėra. Sukurkite ją:</p>
+
           <form onSubmit={handleCreatePart}>
             <div className="form-group">
               <label>Detalės pavadinimas *</label>
               <input
                 type="text"
                 value={formData.name}
-                onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
+                onChange={(event) => setFormData((prev) => ({ ...prev, name: event.target.value }))}
                 placeholder="pvz. Alyvos filtras"
                 required
               />
@@ -648,10 +480,10 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
                 <label>Kategorija</label>
                 <select
                   value={formData.category_id}
-                  onChange={(e) => setFormData(prev => ({ ...prev, category_id: e.target.value }))}
+                  onChange={(event) => setFormData((prev) => ({ ...prev, category_id: event.target.value }))}
                 >
                   <option value="">Pasirinkite...</option>
-                  {categories.map(cat => (
+                  {categories.map((cat) => (
                     <option key={cat.id} value={cat.id}>{cat.name}</option>
                   ))}
                 </select>
@@ -662,7 +494,7 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
                 <input
                   type="number"
                   value={formData.quantity}
-                  onChange={(e) => setFormData(prev => ({ ...prev, quantity: parseInt(e.target.value) }))}
+                  onChange={(event) => setFormData((prev) => ({ ...prev, quantity: event.target.value }))}
                   min="1"
                 />
               </div>
@@ -674,7 +506,7 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
                 <input
                   type="number"
                   value={formData.price}
-                  onChange={(e) => setFormData(prev => ({ ...prev, price: parseFloat(e.target.value) }))}
+                  onChange={(event) => setFormData((prev) => ({ ...prev, price: event.target.value }))}
                   step="0.01"
                   min="0"
                 />
@@ -685,7 +517,7 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
                 <input
                   type="number"
                   value={formData.cost}
-                  onChange={(e) => setFormData(prev => ({ ...prev, cost: parseFloat(e.target.value) }))}
+                  onChange={(event) => setFormData((prev) => ({ ...prev, cost: event.target.value }))}
                   step="0.01"
                   min="0"
                 />
@@ -696,22 +528,22 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
               <label>Aprašymas</label>
               <textarea
                 value={formData.description}
-                onChange={(e) => setFormData(prev => ({ ...prev, description: e.target.value }))}
+                onChange={(event) => setFormData((prev) => ({ ...prev, description: event.target.value }))}
                 placeholder="Papildoma informacija..."
                 rows="3"
-              ></textarea>
+              />
             </div>
 
             <div style={{ paddingTop: '15px', borderTop: '2px solid #ddd' }}>
-              <h4 style={{ marginBottom: '12px', color: '#333' }}>🚗 Automobilio Suderinamumas</h4>
-              
+              <h4 style={{ marginBottom: '12px', color: '#333' }}>🚗 Automobilio suderinamumas</h4>
+
               <div className="form-row">
                 <div className="form-group">
                   <label>Markė (pvz. Toyota, BMW)</label>
                   <input
                     type="text"
                     value={formData.car_make}
-                    onChange={(e) => setFormData(prev => ({ ...prev, car_make: e.target.value }))}
+                    onChange={(event) => setFormData((prev) => ({ ...prev, car_make: event.target.value }))}
                     placeholder="pvz. Toyota"
                   />
                 </div>
@@ -721,7 +553,7 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
                   <input
                     type="text"
                     value={formData.car_model}
-                    onChange={(e) => setFormData(prev => ({ ...prev, car_model: e.target.value }))}
+                    onChange={(event) => setFormData((prev) => ({ ...prev, car_model: event.target.value }))}
                     placeholder="pvz. Camry"
                   />
                 </div>
@@ -733,7 +565,7 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
                   <input
                     type="number"
                     value={formData.car_year_from}
-                    onChange={(e) => setFormData(prev => ({ ...prev, car_year_from: e.target.value }))}
+                    onChange={(event) => setFormData((prev) => ({ ...prev, car_year_from: event.target.value }))}
                     placeholder="pvz. 2015"
                     min="1900"
                     max={new Date().getFullYear()}
@@ -745,7 +577,7 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
                   <input
                     type="number"
                     value={formData.car_year_to}
-                    onChange={(e) => setFormData(prev => ({ ...prev, car_year_to: e.target.value }))}
+                    onChange={(event) => setFormData((prev) => ({ ...prev, car_year_to: event.target.value }))}
                     placeholder="pvz. 2023"
                     min="1900"
                     max={new Date().getFullYear() + 1}
@@ -754,11 +586,11 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
               </div>
 
               <div className="form-group">
-                <label>OE/Fabrikinis Numeris</label>
+                <label>OE/Fabrikinis numeris</label>
                 <input
                   type="text"
                   value={formData.oe_number}
-                  onChange={(e) => setFormData(prev => ({ ...prev, oe_number: e.target.value }))}
+                  onChange={(event) => setFormData((prev) => ({ ...prev, oe_number: event.target.value }))}
                   placeholder="pvz. 1234567-890, OEM-12345"
                 />
               </div>
@@ -777,7 +609,7 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
               >
                 🔍 Google paieška
               </a>
-              <button 
+              <button
                 type="button"
                 className="btn btn-secondary"
                 onClick={() => {
@@ -796,10 +628,10 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
       <div className="tips">
         <h4>📌 Patarimai:</h4>
         <ul>
-          <li>Naudokite USB barkodskaitytuvo įrenginį arba mobilaus telefono kamerą</li>
-          <li>Sutelkite į barkodinį skaitymo laukelį ir nuskaitykite barkodinį</li>
-          <li>Jei bitės naujos detalės, ji automatiškai surodysima sukurti</li>
-          <li>Jei barkodas jau egzistuoja, bus rodoma esamos detalės informacija</li>
+          <li>Laikykite barkodą 10-20 cm atstumu nuo kameros</li>
+          <li>Jei per šviesu, išjunkite žibintuvėlį</li>
+          <li>Skenavimas automatinis - radus kodą forma atsidarys pati</li>
+          <li>Jei detalė neegzistuoja, galite ją iškart sukurti</li>
         </ul>
       </div>
     </div>
