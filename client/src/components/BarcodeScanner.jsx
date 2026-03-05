@@ -198,14 +198,15 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
         const selectedTrack = stream.getVideoTracks()[0]
         const selectedId = selectedTrack?.getSettings?.()?.deviceId
         if (selectedId !== rearCamera.deviceId) {
-          stream.getTracks().forEach((track) => track.stop())
-          stream = await navigator.mediaDevices.getUserMedia({
+          const replacementStream = await navigator.mediaDevices.getUserMedia({
             video: {
               ...base,
               deviceId: { exact: rearCamera.deviceId }
             },
             audio: false
           })
+          stream.getTracks().forEach((track) => track.stop())
+          stream = replacementStream
         }
       }
     } catch {
@@ -262,6 +263,13 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
       return
     }
 
+    if (!window.isSecureContext && location.hostname !== 'localhost') {
+      setCameraStarting(false)
+      setCameraStatus('')
+      setCameraError('Kamera veikia tik per HTTPS. Atidarykite svetainę per saugų adresą.')
+      return
+    }
+
     try {
       stopCamera()
       const stream = await openCameraStream()
@@ -287,7 +295,19 @@ function BarcodeScanner({ onBarcodeDetected, onNewPart, categories, loading }) {
     } catch (error) {
       console.error('Start camera error:', error)
       stopCamera()
-      setCameraError('Nepavyko įjungti kameros. Leiskite kameros teises ir bandykite dar kartą.')
+
+      if (error?.name === 'NotAllowedError' || error?.name === 'PermissionDeniedError') {
+        setCameraError('Nėra kameros leidimo. Leiskite Camera teises naršyklėje ir bandykite dar kartą.')
+      } else if (error?.name === 'NotFoundError' || error?.name === 'DevicesNotFoundError') {
+        setCameraError('Kamera nerasta. Patikrinkite ar telefone yra aktyvi kamera.')
+      } else if (error?.name === 'NotReadableError' || error?.name === 'TrackStartError') {
+        setCameraError('Kamera užimta kitos programos. Uždarykite kitas apps ir bandykite dar kartą.')
+      } else if (error?.name === 'OverconstrainedError') {
+        setCameraError('Šis kameros režimas telefone nepalaikomas. Perkraukite puslapį ir bandykite vėl.')
+      } else {
+        setCameraError('Nepavyko įjungti kameros. Leiskite kameros teises ir bandykite dar kartą.')
+      }
+
       setCameraStarting(false)
       setCameraStatus('')
     }
